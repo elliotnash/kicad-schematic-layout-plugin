@@ -1,16 +1,20 @@
+#!/usr/bin/env python3
 """Lay out PCB footprints in the same arrangement as their schematic symbols.
 
-Pcbnew action plugin for KiCad 7, 8, 9 and 10 (SWIG Python API).
+KiCad IPC API plugin. KiCad runs this script in its own Python environment
+when the action is invoked from the PCB editor; it talks to the running
+PCB editor through the kicad-python (kipy) library.
 """
 import json
 import os
 import re
+import sys
 import traceback
-
-import pcbnew
 
 
 DEBUG = None
+
+ACTION_NAME = 'Schematic positions -> PCB positions'
 
 # Schematic positions are stored in units of 0.01 mm and scaled by
 # POS_SCALE (nm per unit) when placed on the board.
@@ -18,6 +22,10 @@ POS_SCALE = 5000
 
 # Vertical spacing between sheets, as a multiple of each sheet's height.
 OFFSET_FACTOR = 1.25
+
+
+class UserError(Exception):
+    """An error to report to the user without a traceback."""
 
 
 # S-expression tokens: "(", ")", a double-quoted string (with backslash
@@ -174,96 +182,138 @@ def load_sheets(root_files):
     return sheets
 
 
-def move_footprints(components, board):
-    selection_active = any(fp.IsSelected() for fp in board.GetFootprints())
-    for fp in board.GetFootprints():
-        ref = fp.GetReference()
-        path = '/' + '/'.join([x.AsString() for x in fp.GetPath()])
+def component_targets(sheets):
+    """Map each symbol's footprint path to (ref, sheet_path, x_nm, y_nm).
+
+    Sheets are laid out one after another down the page, each offset by
+    the heights of the sheets before it.
+    """
+    targets = dict()
+    running_offset = 0
+    for sheet_path, s in sheets:
+        offset = int(running_offset)
+        running_offset += OFFSET_FACTOR * s.height()
+        print('Processing', sheet_path or '/', 'offset', offset, file=DEBUG)
+        for cid, (ref, pos) in s.components.items():
+            targets[sheet_path + '/' + cid] = (
+                ref, sheet_path, pos[0] * POS_SCALE, (pos[1] + offset) * POS_SCALE)
+    return targets
+
+
+def schematic_targets(work_dir, project_name):
+    root_files = root_schematic_files(work_dir, project_name)
+    print('root_schematic_files = {}'.format(root_files), file=DEBUG)
+    missing = [f for f in root_files if not os.path.isfile(f)]
+    if missing:
+        raise UserError('Schematic not found: ' + ', '.join(missing))
+    targets = component_targets(load_sheets(root_files))
+    for path in targets:
+        print(path, targets[path], file=DEBUG)
+    return targets
+
+
+def move_footprint(fp, position):
+    """Move a footprint and all of its child items to a new position."""
+    from kipy.board_types import Barcode, BoardTextBox
+
+    delta = position - fp.position
+    # Moves the footprint's fields, pads, text, shapes and zones.
+    fp.position = position
+    # kipy does not move these child items itself.
+    for item in fp.definition.items:
+        if isinstance(item, BoardTextBox):
+            item.top_left = item.top_left + delta
+            item.bottom_right = item.bottom_right + delta
+        elif isinstance(item, Barcode):
+            item.position = item.position + delta
+
+
+def board_file_path(board):
+    board_file = board.name
+    if not board_file:
+        raise UserError('Save the board as part of a KiCad project first.')
+    if not os.path.isabs(board_file):
+        board_file = os.path.join(board.get_project().path, board_file)
+    return os.path.abspath(board_file)
+
+
+def move_footprints(board, targets):
+    from kipy.geometry import Vector2
+    from kipy.proto.common.types import KiCadObjectType
+
+    footprints = board.get_footprints()
+    selected = {item.id.value for item in
+                board.get_selection(types=[KiCadObjectType.KOT_PCB_FOOTPRINT])}
+
+    to_update = []
+    for fp in footprints:
+        ref = fp.reference_field.text.value
+        path = '/' + '/'.join(kiid.value for kiid in fp.sheet_path.path)
         print(ref, path, file=DEBUG)
-        if path not in components:
+        if path not in targets:
             print('  NOT FOUND', file=DEBUG)
             continue
-        ref, pos, sheet, offset = components[path]
-        if fp.IsLocked():
+        ref, sheet, x, y = targets[path]
+        if fp.locked:
             print('  path =', path, '  sheet =', sheet, '  ref =', ref, ' is locked, skip', file=DEBUG)
             continue
-        new_pos = pcbnew.VECTOR2I(pos[0] * POS_SCALE, (pos[1] + offset) * POS_SCALE)
         print('  path =', path, '  sheet =', sheet, '  ref =', ref,
-              '  pos =', pos, '  new_pos =', new_pos, file=DEBUG)
-        if not selection_active or fp.IsSelected():
-            fp.SetPosition(new_pos)
+              '  new_pos =', (x, y), file=DEBUG)
+        if not selected or fp.id.value in selected:
+            move_footprint(fp, Vector2.from_xy(x, y))
+            to_update.append(fp)
+
+    # Apply all moves as a single undoable step.
+    if to_update:
+        commit = board.begin_commit()
+        try:
+            board.update_items(to_update)
+        except Exception:
+            board.drop_commit(commit)
+            raise
+        board.push_commit(commit, ACTION_NAME)
+    print('moved', len(to_update), 'footprints', file=DEBUG)
+    return len(to_update)
 
 
-def show_error(message):
+def main():
+    global DEBUG
+    debug_file = None
     try:
-        import wx
-        wx.MessageBox(message, 'Schematic positions -> PCB positions',
-                      wx.OK | wx.ICON_ERROR)
-    except Exception:
-        print(message)
+        try:
+            from kipy import KiCad
+        except ImportError:
+            raise UserError('The kicad-python package is not installed in this '
+                            "plugin's Python environment.")
 
+        board = KiCad(timeout_ms=60000).get_board()
+        board_path = board_file_path(board)
+        work_dir, in_pcb_file = os.path.split(board_path)
+        project_name = os.path.splitext(in_pcb_file)[0]
 
-class SchematicPositionsToLayoutPlugin(pcbnew.ActionPlugin):
-    def defaults(self):
-        self.name = "Schematic positions -> PCB positions"
-        self.category = "Modify PCB"
-        self.description = "Layout components on PCB in same spatial relationships as components on schematic"
-        self.show_toolbar_button = True
-        self.icon_file_name = os.path.join(os.path.dirname(__file__), 'sch2layout.png')
-
-    def Run(self):
-        global DEBUG
-        board_file = pcbnew.GetBoard().GetFileName()
-        if not board_file:
-            show_error('Save the board as part of a KiCad project first.')
-            return
-        work_dir = os.path.dirname(os.path.abspath(board_file))
         debug_file = os.path.join(work_dir, 'schematic-positions-to-layout.debug')
         DEBUG = open(debug_file, 'w', encoding='utf-8')
-        try:
-            self.DoRun()
-        except Exception as e:
+        print('work_dir = {}'.format(work_dir), file=DEBUG)
+        print('in_pcb_file = {}'.format(in_pcb_file), file=DEBUG)
+
+        targets = schematic_targets(work_dir, project_name)
+        move_footprints(board, targets)
+        return 0
+    except Exception as e:
+        if DEBUG is not None:
             traceback.print_exc(file=DEBUG)
-            show_error('{}\n\nDetails are in {}'.format(e, debug_file))
-        finally:
+        elif not isinstance(e, UserError):
+            traceback.print_exc()
+        message = str(e) or type(e).__name__
+        if debug_file and not isinstance(e, UserError):
+            message += ' (details in {})'.format(debug_file)
+        print(message, file=sys.stderr)
+        return 1
+    finally:
+        if DEBUG is not None:
             DEBUG.close()
             DEBUG = None
 
-    def DoRun(self):
-        board = pcbnew.GetBoard()
-        work_dir, in_pcb_file = os.path.split(os.path.abspath(board.GetFileName()))
-        project_name = os.path.splitext(in_pcb_file)[0]
-        root_files = root_schematic_files(work_dir, project_name)
-        print('work_dir = {}'.format(work_dir), file=DEBUG)
-        print('in_pcb_file = {}'.format(in_pcb_file), file=DEBUG)
-        print('root_schematic_files = {}'.format(root_files), file=DEBUG)
 
-        missing = [f for f in root_files if not os.path.isfile(f)]
-        if missing:
-            raise FileNotFoundError('Schematic not found: ' + ', '.join(missing))
-
-        # Read schematic sheets, starting at the top-level sheets and
-        # following links to sub-sheets.
-        sheets = load_sheets(root_files)
-
-        # Lay the sheets out one after another down the page, and make a
-        # master component map recording each component's position in its
-        # sheet plus that sheet's vertical offset.
-        components = dict()
-        running_offset = 0
-        for sheet_path, s in sheets:
-            offset = int(running_offset)
-            running_offset += OFFSET_FACTOR * s.height()
-            print('Processing', sheet_path or '/', 'offset', offset, file=DEBUG)
-            for cid, (ref, pos) in s.components.items():
-                components[sheet_path + '/' + cid] = (ref, pos, sheet_path, offset)
-
-        for cid in components:
-            print(cid, components[cid], file=DEBUG)
-
-        # Move the components.
-        move_footprints(components, board)
-        pcbnew.Refresh()
-
-
-SchematicPositionsToLayoutPlugin().register()
+if __name__ == '__main__':
+    sys.exit(main())

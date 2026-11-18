@@ -1,0 +1,22 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "com.github.elliotnash.kicad-schematic-layout-plugin",
+  "name": "Schematic positions to PCB positions",
+  "description": "Lay out PCB footprints in the same spatial relationships as their symbols on the schematic",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.9"
+  },
+  "actions": [
+    {
+      "identifier": "sch2layout",
+      "name": "Schematic positions -> PCB positions",
+      "description": "Layout components on PCB in same spatial relationships as components on schematic",
+      "show-button": true,
+      "scopes": ["pcb"],
+      "entrypoint": "SchematicPositionsToLayout.py",
+      "icons-light": ["sch2layout.png"],
+      "icons-dark": ["sch2layout.png"]
+    }
+  ]
+}
