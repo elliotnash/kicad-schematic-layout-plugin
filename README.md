@@ -4,26 +4,43 @@
 
 Based on an original idea by @jenschr
 
-Versions:
-- `SchematicPositionsToLayout.py`: KiCad v7,KiCad v8.
+Supported versions: KiCad 7, 8, 9 and 10.
+
+The plugin uses KiCad's SWIG Python API, which is deprecated since
+KiCad 9 and removed in KiCad 11, so it will not run on KiCad 11 or
+later.
 
 The `SchematicPositionsToLayout.py` plugin helps with the initial
 organisation of parts when first creating a PCB layout from a
-schematic. Install the `SchematicPositionsToLayout.py` in your KiCad
-plugins folder and refresh your plugin list in Pcbnew. Then to use
-the plugin:
+schematic.
 
-1. Create a netlist from your schematic.
+### Installation
 
-2. Create a new PCB layout and import the netlist you created.
+Copy this whole folder (`__init__.py`, `SchematicPositionsToLayout.py`
+and `sch2layout.png`) into your KiCad scripting plugins folder. To find
+it, open the PCB Editor and choose "Tools" -> "External Plugins" ->
+"Open Plugin Directory". On Linux it is
+`~/.local/share/kicad/10.0/scripting/plugins/`.
 
-3. Select "Schematic positions -> PCB positions" from the "Tools" ->
-   "External plugins..." menu in Pcbnew.
+Then choose "Tools" -> "External Plugins" -> "Refresh Plugins", or
+restart KiCad.
+
+### Usage
+
+1. Create a new PCB layout and run "Tools" -> "Update PCB from
+   Schematic..." to bring in the footprints.
+
+2. Select "Schematic positions -> PCB positions" from the "Tools" ->
+   "External Plugins" menu, or click its toolbar button.
 
 The result of this action will be that the component footprints in
-Pcbnew will be laid out in the same pattern as their corresponding
-components in the schematic. Hierarchical sheets are laid out one
-after another down the page in non-overlapping areas.
+the PCB editor will be laid out in the same pattern as their
+corresponding components in the schematic. Hierarchical sheets, and
+each top-level sheet of a KiCad 10 project with several of them, are
+laid out one after another down the page in non-overlapping areas.
+
+If any footprints are selected, only those footprints are moved.
+Locked footprints are never moved.
 
 The movement of the component footprints by the plugin is a normal
 editing action, so can be undone if you don't like what you see.
